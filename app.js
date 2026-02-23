@@ -69,10 +69,13 @@ function directionX(yPred) {
 }
 // Helper: Safe sort for TensorFlow.js (browser compatible)
 function sortTensor1D(tensor) {
-  // Convert tensor -> JS array
-  const data = tensor.dataSync();
-  // Sort values (ascending)
+  // Получаем значения тензора
+  const values = tensor.dataSync();
+
+  // Копируем и сортируем (важно: именно values, не data)
   const sorted = Float32Array.from(values).sort((a, b) => a - b);
+
+  // Возвращаем новый тензор
   return tf.tensor1d(sorted, 'float32');
 }
 // ==========================================
