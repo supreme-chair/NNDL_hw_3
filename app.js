@@ -68,15 +68,29 @@ function directionX(yPred) {
   return tf.mean(yPred.mul(mask)).mul(-1);
 }
 // Helper: Safe sort for TensorFlow.js (browser compatible)
-function sortTensor1D(tensor) {
-  // Получаем значения тензора
-  const values = tensor.dataSync();
+function softHistogramLoss(yTrue, yPred, bins = 32) {
+  return tf.tidy(() => {
+    const yT = yTrue.reshape([-1]);
+    const yP = yPred.reshape([-1]);
 
-  // Копируем и сортируем (важно: именно values, не data)
-  const sorted = Float32Array.from(values).sort((a, b) => a - b);
+    const min = 0.0;
+    const max = 1.0;
+    const binWidth = (max - min) / bins;
 
-  // Возвращаем новый тензор
-  return tf.tensor1d(sorted, 'float32');
+    let loss = tf.scalar(0);
+    for (let i = 0; i < bins; i++) {
+      const center = min + i * binWidth + binWidth / 2;
+
+      const tDist = tf.exp(yT.sub(center).square().div(-0.01));
+      const pDist = tf.exp(yP.sub(center).square().div(-0.01));
+
+      const tHist = tf.mean(tDist);
+      const pHist = tf.mean(pDist);
+
+      loss = loss.add(tHist.sub(pHist).square());
+    }
+    return loss;
+  });
 }
 // ==========================================
 // 3. Model Architecture
@@ -252,8 +266,6 @@ function resetModels(archType = null) {
   if (state.studentOptimizer) {
   state.studentOptimizer.dispose();
   }
-  state.baselineOptimizer = tf.train.adam(CONFIG.learningRate);
-  state.studentOptimizer = tf.train.adam(CONFIG.learningRate);
 
   // Create New Models
   state.baselineModel = createBaselineModel();
@@ -274,10 +286,13 @@ function resetModels(archType = null) {
 }
 
 async function render() {
-  // Tensor memory management with tidy not possible here due to async toPixels,
-  // so we manually dispose predictions.
-  const basePred = state.baselineModel.predict(state.xInput);
-  const studPred = state.studentModel.predict(state.xInput);
+  // Получаем предсказания
+  let basePred = state.baselineModel.predict(state.xInput);
+  let studPred = state.studentModel.predict(state.xInput);
+
+  // 🔥 КРИТИЧЕСКОЕ: нормализация для отображения (иначе всё чёрное)
+  basePred = basePred.clipByValue(0, 1);
+  studPred = studPred.clipByValue(0, 1);
 
   await tf.browser.toPixels(
     basePred.squeeze(),
@@ -345,30 +360,23 @@ function loop() {
 
 function studentLoss(yTrue, yPred) {
   return tf.tidy(() => {
-    // Flatten
-    const yTrueFlat = yTrue.reshape([-1]);
-    const yPredFlat = yPred.reshape([-1]);
+    // 1. Distribution preservation (ВМЕСТО sort!)
+    const lossHist = softHistogramLoss(yTrue, yPred, 32);
 
-    // SORTED MSE (главный закон задачи)
-    const yTrueSorted = sortTensor1D(yTrueFlat);
-    const yPredSorted = sortTensor1D(yPredFlat);
-    const lossHistogram = mse(yTrueSorted, yPredSorted);
-
-    // VERY WEAK reconstruction (не копировать позиции)
-    const lossWeakMSE = mse(yTrue, yPred).mul(0.01);
-
-    // Smoothness (геометрия)
+    // 2. Smooth gradient structure
     const lossSmooth = smoothness(yPred);
 
-    // Direction (слабая направляющая)
+    // 3. Direction constraint
     const lossDir = directionX(yPred);
 
-    // КРИТИЧЕСКИЙ БАЛАНС:
+    // 4. VERY weak anchor (чтобы не коллапсило в ноль)
+    const lossAnchor = mse(yTrue, yPred).mul(0.02);
+
     return tf.addN([
-      lossHistogram.mul(5.0),   // 🔥 главный закон: не менять цвета
-      lossSmooth.mul(1.5),      // форма градиента
-      lossDir.mul(0.1),         // направление
-      lossWeakMSE               // анти-копирование
+      lossHist.mul(3.0),   // главный закон: не менять цвета
+      lossSmooth.mul(1.0), // гладкость
+      lossDir.mul(0.2),    // направление
+      lossAnchor           // анти-коллапс
     ]);
   });
 }
