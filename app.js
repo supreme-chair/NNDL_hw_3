@@ -66,7 +66,15 @@ function directionX(yPred) {
   // Maximize (yPred * mask) => Minimize -(yPred * mask)
   return tf.mean(yPred.mul(mask)).mul(-1);
 }
-
+// Helper: Safe sort for TensorFlow.js (browser compatible)
+function sortTensor1D(tensor) {
+  // Convert tensor -> JS array
+  const data = tensor.dataSync();
+  // Sort values (ascending)
+  const sorted = Array.from(data).sort((a, b) => a - b);
+  // Back to tensor
+  return tf.tensor1d(sorted);
+}
 // ==========================================
 // 3. Model Architecture
 // ==========================================
@@ -92,29 +100,23 @@ function createStudentModel(archType) {
   model.add(tf.layers.flatten({ inputShape: CONFIG.inputShapeModel }));
 
   if (archType === "compression") {
-    // [Implemented] Bottleneck: Compress information
+    // Already correct bottleneck
     model.add(tf.layers.dense({ units: 64, activation: "relu" }));
     model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
+
   } else if (archType === "transformation") {
-    // [TODO]: Implement Transformation (1:1 mapping)
-    // Hint: Maintain dimension (e.g., hidden layer size approx equal to input size 256)
-    // model.add(tf.layers.dense({units: 256, activation: 'relu'}));
-    // model.add(tf.layers.dense({units: 256, activation: 'sigmoid'}));
+    // Same dimension (256 -> 256)
+    model.add(tf.layers.dense({ units: 256, activation: "relu" }));
+    model.add(tf.layers.dense({ units: 256, activation: "relu" }));
+    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
 
-    throw new Error(
-      "Transformation architecture NOT implemented yet! (Check app.js TODO-A)",
-    );
   } else if (archType === "expansion") {
-    // [TODO]: Implement Expansion (Overcomplete)
-    // Hint: Increase dimension (e.g., hidden layer > 256)
-    // model.add(tf.layers.dense({units: 512, activation: 'relu'}));
-    // model.add(tf.layers.dense({units: 256, activation: 'sigmoid'}));
+    // Overcomplete projection (bigger latent space)
+    model.add(tf.layers.dense({ units: 512, activation: "relu" }));
+    model.add(tf.layers.dense({ units: 512, activation: "relu" }));
+    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
 
-    throw new Error(
-      "Expansion architecture NOT implemented yet! (Check app.js TODO-A)",
-    );
   } else {
-    // Safety check for unknown architectures
     throw new Error(`Unknown architecture type: ${archType}`);
   }
 
@@ -122,32 +124,6 @@ function createStudentModel(archType) {
   return model;
 }
 
-// ==========================================
-// 4. Custom Loss Function
-// ==========================================
-
-// ------------------------------------------------------------------
-// [TODO-B]: STUDENT LOSS DESIGN
-// Modify this function to create a smooth gradient.
-// Currently, it only uses MSE (Identity mapping).
-// ------------------------------------------------------------------
-function studentLoss(yTrue, yPred) {
-  return tf.tidy(() => {
-    // 1. Basic Reconstruction (MSE) - "Be like the input"
-    const lossMSE = mse(yTrue, yPred);
-
-    // 2. [TODO] Smoothness - "Be smooth locally"
-    // const lossSmooth = smoothness(yPred).mul(0.0); // Increase weight (e.g., 0.1)
-
-    // 3. [TODO] Direction - "Be bright on the right"
-    // const lossDir = directionX(yPred).mul(0.0); // Increase weight (e.g., 0.1)
-
-    // Total Loss
-    // return lossMSE.add(lossSmooth).add(lossDir);
-
-    return lossMSE; // Default: Only MSE
-  });
-}
 
 // ==========================================
 // 5. Training Loop
@@ -369,8 +345,8 @@ function studentLoss(yTrue, yPred) {
     const yPredFlat = yPred.reshape([-1]);
 
     // Sort pixels (this removes position constraint!)
-    const yTrueSorted = tf.sort(yTrueFlat);
-    const yPredSorted = tf.sort(yPredFlat);
+    const yTrueSorted = sortTensor1D(yTrueFlat);
+    const yPredSorted = sortTensor1D(yPredFlat);
 
     // Distribution matching loss (Histogram preservation)
     const sortedMSE = mse(yTrueSorted, yPredSorted);
