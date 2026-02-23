@@ -25,7 +25,8 @@ let state = {
   xInput: null, // The fixed noise input
   baselineModel: null,
   studentModel: null,
-  optimizer: null,
+  baselineOptimizer: null,
+  studentOptimizer: null,
 };
 
 // ==========================================
@@ -71,9 +72,8 @@ function sortTensor1D(tensor) {
   // Convert tensor -> JS array
   const data = tensor.dataSync();
   // Sort values (ascending)
-  const sorted = Array.from(data).sort((a, b) => a - b);
-  // Back to tensor
-  return tf.tensor1d(sorted);
+  const sorted = Float32Array.from(values).sort((a, b) => a - b);
+  return tf.tensor1d(sorted, 'float32');
 }
 // ==========================================
 // 3. Model Architecture
@@ -147,7 +147,7 @@ async function trainStep() {
       return mse(state.xInput, yPred); // Baseline always uses MSE
     }, state.baselineModel.getWeights());
 
-    state.optimizer.applyGradients(grads);
+    state.baselineOptimizer.applyGradients(grads);
     return value.dataSync()[0];
   });
 
@@ -161,6 +161,7 @@ async function trainStep() {
       }, state.studentModel.getWeights());
 
       state.optimizer.applyGradients(grads);
+      state.studentOptimizer.applyGradients(grads);
       return value.dataSync()[0];
     });
     log(
@@ -243,10 +244,14 @@ function resetModels(archType = null) {
     state.studentModel = null;
   }
   // Important: Dispose optimizer because it holds references to old model variables.
-  if (state.optimizer) {
-    state.optimizer.dispose();
-    state.optimizer = null;
+  if (state.baselineOptimizer) {
+  state.baselineOptimizer.dispose();
   }
+  if (state.studentOptimizer) {
+  state.studentOptimizer.dispose();
+  }
+  state.baselineOptimizer = tf.train.adam(CONFIG.learningRate);
+  state.studentOptimizer = tf.train.adam(CONFIG.learningRate);
 
   // Create New Models
   state.baselineModel = createBaselineModel();
@@ -368,8 +373,8 @@ function studentLoss(yTrue, yPred) {
     // ===============================
     // Tunable coefficients (students can experiment)
     const lambdaSorted = 1.0;   // Preserve color inventory (MOST important)
-    const lambdaSmooth = 0.3;   // Make image smooth
-    const lambdaDir = 0.5;      // Create horizontal gradient
+    const lambdaSmooth = 2.0;   // Make image smooth
+    const lambdaDir = 0.2;      // Create horizontal gradient
 
     const totalLoss = tf.addN([
       sortedMSE.mul(lambdaSorted),
