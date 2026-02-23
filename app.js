@@ -163,7 +163,6 @@ async function trainStep() {
         return studentLoss(state.xInput, yPred); // Uses student's custom loss
       }, state.studentModel.getWeights());
 
-      state.optimizer.applyGradients(grads);
       state.studentOptimizer.applyGradients(grads);
       return value.dataSync()[0];
     });
@@ -266,7 +265,8 @@ function resetModels(archType = null) {
   }
 
   // Create new optimizer (must be done AFTER models are created)
-  state.optimizer = tf.train.adam(CONFIG.learningRate);
+  state.baselineOptimizer = tf.train.adam(CONFIG.learningRate);
+  state.studentOptimizer = tf.train.adam(CONFIG.learningRate);
   state.step = 0;
 
   log(`Models reset. Student Arch: ${archType}`);
@@ -345,47 +345,29 @@ function loop() {
 
 function studentLoss(yTrue, yPred) {
   return tf.tidy(() => {
-    // ===============================
-    // PART 1 — Sorted MSE (CRITICAL)
-    // ===============================
-    // Flatten tensors to 1D vectors
+    // 1. Histogram preservation (soft constraint)
     const yTrueFlat = yTrue.reshape([-1]);
     const yPredFlat = yPred.reshape([-1]);
 
-    // Sort pixels (this removes position constraint!)
     const yTrueSorted = sortTensor1D(yTrueFlat);
     const yPredSorted = sortTensor1D(yPredFlat);
+    const lossHistogram = mse(yTrueSorted, yPredSorted);
 
-    // Distribution matching loss (Histogram preservation)
-    const sortedMSE = mse(yTrueSorted, yPredSorted);
+    // 2. Smooth structure (geometry shaping)
+    const lossSmooth = smoothness(yPred);
 
-    // ===============================
-    // PART 2 — Smoothness (Total Variation)
-    // ===============================
-    // Encourage neighboring pixels to be similar
-    const smoothLoss = smoothness(yPred);
+    // 3. Weak reconstruction anchor (VERY IMPORTANT)
+    const lossWeakMSE = mse(yTrue, yPred).mul(0.05);
 
-    // ===============================
-    // PART 3 — Direction Constraint
-    // ===============================
-    // Encourage left dark -> right bright gradient
-    const dirLoss = directionX(yPred);
+    // 4. Direction guidance
+    const lossDir = directionX(yPred);
 
-    // ===============================
-    // FINAL COMBINED LOSS (Intent Design)
-    // ===============================
-    // Tunable coefficients (students can experiment)
-    const lambdaSorted = 1.0;   // Preserve color inventory (MOST important)
-    const lambdaSmooth = 2.0;   // Make image smooth
-    const lambdaDir = 0.2;      // Create horizontal gradient
-
-    const totalLoss = tf.addN([
-      sortedMSE.mul(lambdaSorted),
-      smoothLoss.mul(lambdaSmooth),
-      dirLoss.mul(lambdaDir)
+    return tf.addN([
+      lossHistogram.mul(1.0),
+      lossSmooth.mul(2.5),
+      lossDir.mul(0.15),
+      lossWeakMSE // якорь против “перекрашивания”
     ]);
-
-    return totalLoss;
   });
 }
 // Start
