@@ -103,7 +103,7 @@ function createBaselineModel() {
   const model = tf.sequential();
   model.add(tf.layers.flatten({ inputShape: CONFIG.inputShapeModel }));
   model.add(tf.layers.dense({ units: 64, activation: "relu" })); // Bottleneck
-  model.add(tf.layers.dense({ units: 256, activation: "linear" })); // Output 0-1
+  model.add(tf.layers.dense({ units: 256, activation: "sigmoid" })); // Output 0-1
   // Reshape back to [16, 16, 1] (batch dim is handled automatically)
   model.add(tf.layers.reshape({ targetShape: [16, 16, 1] }));
   return model;
