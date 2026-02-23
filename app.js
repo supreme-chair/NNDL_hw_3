@@ -14,7 +14,7 @@ const CONFIG = {
   inputShapeModel: [16, 16, 1],
   // Data tensor shape (includes batch dim) - used for input tensor creation
   inputShapeData: [1, 16, 16, 1],
-  learningRate: 0.05,
+  learningRate: 0.005,
   autoTrainSpeed: 50, // ms delay between steps (lower is faster)
 };
 
@@ -88,7 +88,7 @@ function createBaselineModel() {
   const model = tf.sequential();
   model.add(tf.layers.flatten({ inputShape: CONFIG.inputShapeModel }));
   model.add(tf.layers.dense({ units: 64, activation: "relu" })); // Bottleneck
-  model.add(tf.layers.dense({ units: 256, activation: "sigmoid" })); // Output 0-1
+  model.add(tf.layers.dense({ units: 256, activation: "linear" })); // Output 0-1
   // Reshape back to [16, 16, 1] (batch dim is handled automatically)
   model.add(tf.layers.reshape({ targetShape: [16, 16, 1] }));
   return model;
@@ -105,19 +105,19 @@ function createStudentModel(archType) {
   if (archType === "compression") {
     // Already correct bottleneck
     model.add(tf.layers.dense({ units: 64, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
+    model.add(tf.layers.dense({ units: 256, activation: "linear" }));
 
   } else if (archType === "transformation") {
     // Same dimension (256 -> 256)
     model.add(tf.layers.dense({ units: 256, activation: "relu" }));
     model.add(tf.layers.dense({ units: 256, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
+    model.add(tf.layers.dense({ units: 256, activation: "linear" }));
 
   } else if (archType === "expansion") {
     // Overcomplete projection (bigger latent space)
     model.add(tf.layers.dense({ units: 512, activation: "relu" }));
     model.add(tf.layers.dense({ units: 512, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
+    model.add(tf.layers.dense({ units: 256, activation: "linear" }));
 
   } else {
     throw new Error(`Unknown architecture type: ${archType}`);
@@ -345,28 +345,30 @@ function loop() {
 
 function studentLoss(yTrue, yPred) {
   return tf.tidy(() => {
-    // 1. Histogram preservation (soft constraint)
+    // Flatten
     const yTrueFlat = yTrue.reshape([-1]);
     const yPredFlat = yPred.reshape([-1]);
 
+    // SORTED MSE (главный закон задачи)
     const yTrueSorted = sortTensor1D(yTrueFlat);
     const yPredSorted = sortTensor1D(yPredFlat);
     const lossHistogram = mse(yTrueSorted, yPredSorted);
 
-    // 2. Smooth structure (geometry shaping)
+    // VERY WEAK reconstruction (не копировать позиции)
+    const lossWeakMSE = mse(yTrue, yPred).mul(0.01);
+
+    // Smoothness (геометрия)
     const lossSmooth = smoothness(yPred);
 
-    // 3. Weak reconstruction anchor (VERY IMPORTANT)
-    const lossWeakMSE = mse(yTrue, yPred).mul(0.05);
-
-    // 4. Direction guidance
+    // Direction (слабая направляющая)
     const lossDir = directionX(yPred);
 
+    // КРИТИЧЕСКИЙ БАЛАНС:
     return tf.addN([
-      lossHistogram.mul(1.0),
-      lossSmooth.mul(2.5),
-      lossDir.mul(0.15),
-      lossWeakMSE // якорь против “перекрашивания”
+      lossHistogram.mul(5.0),   // 🔥 главный закон: не менять цвета
+      lossSmooth.mul(1.5),      // форма градиента
+      lossDir.mul(0.1),         // направление
+      lossWeakMSE               // анти-копирование
     ]);
   });
 }
