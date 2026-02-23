@@ -92,6 +92,21 @@ function softHistogramLoss(yTrue, yPred, bins = 32) {
     return loss;
   });
 }
+// HARD constraint: rearrange pixels without creating new colors
+function rearrangeByScores(xInput, scores) {
+  return tf.tidy(() => {
+    const xFlat = xInput.reshape([256]);     // original pixels
+    const sFlat = scores.reshape([256]);     // predicted positions
+
+    // Get sort indices based on predicted scores
+    const indices = tf.argsort(sFlat);
+
+    // Reorder ORIGINAL pixels (not predicted values!)
+    const rearranged = tf.gather(xFlat, indices);
+
+    return rearranged.reshape([1, 16, 16, 1]);
+  });
+}
 // ==========================================
 // 3. Model Architecture
 // ==========================================
@@ -173,8 +188,10 @@ async function trainStep() {
   try {
     studentLossVal = tf.tidy(() => {
       const { value, grads } = tf.variableGrads(() => {
-        const yPred = state.studentModel.predict(state.xInput);
-        return studentLoss(state.xInput, yPred); // Uses student's custom loss
+        const scores = state.studentModel.predict(state.xInput);
+        // 🔥 ГЛАВНОЕ: строим выход ТОЛЬКО из входных пикселей
+        const yPred = rearrangeByScores(state.xInput, scores);
+        return studentLoss(state.xInput, yPred);
       }, state.studentModel.getWeights());
 
       state.studentOptimizer.applyGradients(grads);
@@ -286,13 +303,13 @@ function resetModels(archType = null) {
 }
 
 async function render() {
-  // Получаем предсказания
-  let basePred = state.baselineModel.predict(state.xInput);
-  let studPred = state.studentModel.predict(state.xInput);
+  const baseRaw = state.baselineModel.predict(state.xInput);
+  const studScores = state.studentModel.predict(state.xInput);
 
-  // 🔥 КРИТИЧЕСКОЕ: нормализация для отображения (иначе всё чёрное)
-  basePred = basePred.clipByValue(0, 1);
-  studPred = studPred.clipByValue(0, 1);
+  // 🔥 Rearranged output (NO new colors)
+  const studPred = rearrangeByScores(state.xInput, studScores);
+
+  const basePred = baseRaw.clipByValue(0, 1);
 
   await tf.browser.toPixels(
     basePred.squeeze(),
@@ -303,7 +320,8 @@ async function render() {
     document.getElementById("canvas-student"),
   );
 
-  basePred.dispose();
+  baseRaw.dispose();
+  studScores.dispose();
   studPred.dispose();
 }
 
@@ -360,23 +378,19 @@ function loop() {
 
 function studentLoss(yTrue, yPred) {
   return tf.tidy(() => {
-    // 1. Distribution preservation (ВМЕСТО sort!)
-    const lossHist = softHistogramLoss(yTrue, yPred, 32);
-
-    // 2. Smooth gradient structure
+    // 1. Smooth gradient structure
     const lossSmooth = smoothness(yPred);
 
-    // 3. Direction constraint
+    // 2. Direction constraint (left dark -> right bright)
     const lossDir = directionX(yPred);
 
-    // 4. VERY weak anchor (чтобы не коллапсило в ноль)
-    const lossAnchor = mse(yTrue, yPred).mul(0.02);
+    // 3. VERY weak anchor (stability)
+    const lossAnchor = mse(yTrue, yPred).mul(0.01);
 
     return tf.addN([
-      lossHist.mul(3.0),   // главный закон: не менять цвета
-      lossSmooth.mul(1.0), // гладкость
-      lossDir.mul(0.2),    // направление
-      lossAnchor           // анти-коллапс
+      lossSmooth.mul(2.0),
+      lossDir.mul(0.3),
+      lossAnchor
     ]);
   });
 }
