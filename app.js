@@ -92,21 +92,7 @@ function softHistogramLoss(yTrue, yPred, bins = 32) {
     return loss;
   });
 }
-// HARD constraint: rearrange pixels without creating new colors
-function rearrangeByScores(xInput, scores) {
-  return tf.tidy(() => {
-    const xFlat = xInput.reshape([256]);     // original pixels
-    const sFlat = scores.reshape([256]);     // predicted positions
 
-    // Get sort indices based on predicted scores
-    const indices = tf.argsort(sFlat);
-
-    // Reorder ORIGINAL pixels (not predicted values!)
-    const rearranged = tf.gather(xFlat, indices);
-
-    return rearranged.reshape([1, 16, 16, 1]);
-  });
-}
 // ==========================================
 // 3. Model Architecture
 // ==========================================
@@ -132,24 +118,21 @@ function createStudentModel(archType) {
   model.add(tf.layers.flatten({ inputShape: CONFIG.inputShapeModel }));
 
   if (archType === "compression") {
-    // Already correct bottleneck
+    // Undercomplete projection (как baseline, но обучается с другим loss)
     model.add(tf.layers.dense({ units: 64, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "linear" }));
+    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
 
   } else if (archType === "transformation") {
-    // Same dimension (256 -> 256)
+    // Projection 256 → 256 (чистая трансформация)
     model.add(tf.layers.dense({ units: 256, activation: "relu" }));
     model.add(tf.layers.dense({ units: 256, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "linear" }));
+    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
 
   } else if (archType === "expansion") {
-    // Overcomplete projection (bigger latent space)
+    // Overcomplete projection (как в лекции)
     model.add(tf.layers.dense({ units: 512, activation: "relu" }));
     model.add(tf.layers.dense({ units: 512, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "linear" }));
-
-  } else {
-    throw new Error(`Unknown architecture type: ${archType}`);
+    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
   }
 
   model.add(tf.layers.reshape({ targetShape: [16, 16, 1] }));
@@ -188,9 +171,7 @@ async function trainStep() {
   try {
     studentLossVal = tf.tidy(() => {
       const { value, grads } = tf.variableGrads(() => {
-        const scores = state.studentModel.predict(state.xInput);
-        // 🔥 ГЛАВНОЕ: строим выход ТОЛЬКО из входных пикселей
-        const yPred = rearrangeByScores(state.xInput, scores);
+        const yPred = state.studentModel.predict(state.xInput);
         return studentLoss(state.xInput, yPred);
       }, state.studentModel.getWeights());
 
@@ -303,26 +284,25 @@ function resetModels(archType = null) {
 }
 
 async function render() {
-  const baseRaw = state.baselineModel.predict(state.xInput);
-  const studScores = state.studentModel.predict(state.xInput);
+  const basePred = state.baselineModel.predict(state.xInput);
+  const studPred = state.studentModel.predict(state.xInput);
 
-  // 🔥 Rearranged output (NO new colors)
-  const studPred = rearrangeByScores(state.xInput, studScores);
-
-  const basePred = baseRaw.clipByValue(0, 1);
+  const baseVis = basePred.clipByValue(0, 1);
+  const studVis = studPred.clipByValue(0, 1);
 
   await tf.browser.toPixels(
-    basePred.squeeze(),
+    baseVis.squeeze(),
     document.getElementById("canvas-baseline"),
   );
   await tf.browser.toPixels(
-    studPred.squeeze(),
+    studVis.squeeze(),
     document.getElementById("canvas-student"),
   );
 
-  baseRaw.dispose();
-  studScores.dispose();
+  basePred.dispose();
   studPred.dispose();
+  baseVis.dispose();
+  studVis.dispose();
 }
 
 // UI Helpers
@@ -369,6 +349,21 @@ function loop() {
     setTimeout(loop, CONFIG.autoTrainSpeed);
   }
 }
+function sortedMSE(yTrue, yPred) {
+  return tf.tidy(() => {
+    const tFlat = yTrue.reshape([256]);
+    const pFlat = yPred.reshape([256]);
+
+    // JS sort (как делал преподаватель в демо)
+    const tArr = Array.from(tFlat.dataSync()).sort((a, b) => a - b);
+    const pArr = Array.from(pFlat.dataSync()).sort((a, b) => a - b);
+
+    const tSorted = tf.tensor1d(tArr);
+    const pSorted = tf.tensor1d(pArr);
+
+    return mse(tSorted, pSorted);
+  });
+}
 // TODO-B: Custom Loss (Gradient Puzzle)
 // Goal:
 // 1. Allow pixel rearrangement (NOT position-locked like MSE)
@@ -378,19 +373,25 @@ function loop() {
 
 function studentLoss(yTrue, yPred) {
   return tf.tidy(() => {
-    // 1. Smooth gradient structure
+    // 1. 🔥 ГЛАВНЫЙ ЗАКОН ЗАДАНИЯ
+    // Сохраняем набор цветов (Input Histogram ≈ Output Histogram)
+    const lossSorted = sortedMSE(yTrue, yPred);
+
+    // 2. Гладкость (чтобы получился градиент)
     const lossSmooth = smoothness(yPred);
 
-    // 2. Direction constraint (left dark -> right bright)
+    // 3. Направление (left dark → right bright)
     const lossDir = directionX(yPred);
 
-    // 3. VERY weak anchor (stability)
-    const lossAnchor = mse(yTrue, yPred).mul(0.01);
+    // 4. Очень слабая привязка к входу (стабильность)
+    const lossAnchor = mse(yTrue, yPred).mul(0.05);
 
+    // Баланс как в учебной задаче
     return tf.addN([
-      lossSmooth.mul(2.0),
-      lossDir.mul(0.3),
-      lossAnchor
+      lossSorted.mul(3.0),   // 🔥 ключ: не создавать новые цвета
+      lossSmooth.mul(1.5),   // формируем структуру градиента
+      lossDir.mul(0.3),      // направление градиента
+      lossAnchor             // предотвращает коллапс
     ]);
   });
 }
