@@ -125,26 +125,26 @@ function createStudentModel(archType) {
 async function trainStep() {
   state.step++;
 
-  const baselineLossVal = tf.tidy(() => {
-    const { value, grads } = tf.variableGrads(() => {
-      const yPred = state.baselineModel.predict(state.xInput);
-      return mse(state.xInput, yPred);
-    });
-    state.baselineOptimizer.applyGradients(grads);
-    return value.dataSync()[0];
-  });
+  // --- Baseline ---
+  const baselineLossTensor = state.baselineOptimizer.minimize(() => {
+    const yPred = state.baselineModel.predict(state.xInput);
+    return mse(state.xInput, yPred);
+  }, true);
 
-  const studentLossVal = tf.tidy(() => {
-    const { value, grads } = tf.variableGrads(() => {
-      const yPred = state.studentModel.predict(state.xInput);
-      return studentLoss(state.xInput, yPred);
-    });
-    state.studentOptimizer.applyGradients(grads);
-    return value.dataSync()[0];
-  });
+  const baselineLossVal = baselineLossTensor.dataSync()[0];
+  baselineLossTensor.dispose();
+
+  // --- Student (LECTURE LOSS) ---
+  const studentLossTensor = state.studentOptimizer.minimize(() => {
+    const yPred = state.studentModel.predict(state.xInput);
+    return studentLoss(state.xInput, yPred);
+  }, true);
+
+  const studentLossVal = studentLossTensor.dataSync()[0];
+  studentLossTensor.dispose();
 
   log(
-    `Step ${state.step}: Base=${baselineLossVal.toFixed(4)} | Student=${studentLossVal.toFixed(4)}`
+    `Step ${state.step}: Base Loss=${baselineLossVal.toFixed(4)} | Student Loss=${studentLossVal.toFixed(4)}`
   );
 
   if (state.step % 5 === 0 || !state.isAutoTraining) {
@@ -159,30 +159,41 @@ async function trainStep() {
 
 function init() {
   state.xInput = tf.randomUniform(CONFIG.inputShapeData);
-  resetModels();
+
+  // ВАЖНО: явно передаём строку, а не event
+  document.getElementById("btn-train").addEventListener("click", () => {
+    trainStep();
+  });
+
+  document.getElementById("btn-auto").addEventListener("click", () => {
+    toggleAutoTrain();
+  });
+
+  document.getElementById("btn-reset").addEventListener("click", () => {
+    resetModels(); // ← БЕЗ event
+  });
+
+  document.querySelectorAll('input[name="arch"]').forEach((radio) => {
+    radio.addEventListener("change", (e) => {
+      resetModels(e.target.value); // ← строка, не event
+      document.getElementById("student-arch-label").innerText =
+        e.target.value.charAt(0).toUpperCase() + e.target.value.slice(1);
+    });
+  });
+
+  resetModels(); // initial models AFTER handlers
 
   tf.browser.toPixels(
     state.xInput.squeeze(),
     document.getElementById("canvas-input")
   );
 
-  document.getElementById("btn-train").onclick = trainStep;
-  document.getElementById("btn-auto").onclick = toggleAutoTrain;
-  document.getElementById("btn-reset").onclick = resetModels;
-
-  document.querySelectorAll('input[name="arch"]').forEach(radio => {
-    radio.onchange = (e) => {
-      resetModels(e.target.value);
-      document.getElementById("student-arch-label").innerText =
-        e.target.value;
-    };
-  });
-
-  log("FINAL stable version initialized.");
+  log("Initialized. Ready to train.");
 }
 
 function resetModels(archType = null) {
-  if (!archType) {
+  // 🔥 ФИКС: защита от PointerEvent
+  if (typeof archType !== "string") {
     const checked = document.querySelector('input[name="arch"]:checked');
     archType = checked ? checked.value : "compression";
   }
