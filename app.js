@@ -1,262 +1,173 @@
-/**
- * Neural Network Design: The Gradient Puzzle
- * FINAL STABLE VERSION (Matches Lecture Requirements)
- * - Uses Sorted MSE (value conservation)
- * - No explicit permutation layer (as in lecture)
- * - Fully differentiable (no dataSync inside training graph)
- */
+// ================= CONFIG =================
+const SIZE = 16;
+const LR = 0.005;
 
-const CONFIG = {
-  inputShapeModel: [16, 16, 1],
-  inputShapeData: [1, 16, 16, 1],
-  learningRate: 0.003, // ↓ стабильнее
-  autoTrainSpeed: 50,
-};
+let model;
+let optimizer;
+let xInput;
+let auto = false;
+let step = 0;
 
-let state = {
-  step: 0,
-  isAutoTraining: false,
-  xInput: null,
-  baselineModel: null,
-  studentModel: null,
-  baselineOptimizer: null,
-  studentOptimizer: null,
-};
-
-// =======================
-// LOSSES (LECTURE-CORRECT)
-// =======================
-
-// Pixel MSE (baseline only)
-function mse(yTrue, yPred) {
-  return tf.losses.meanSquaredError(yTrue, yPred);
+// =============== LOG ======================
+function log(msg) {
+  const el = document.getElementById("log");
+  const div = document.createElement("div");
+  div.textContent = "> " + msg;
+  el.prepend(div);
 }
 
-// Sorted MSE (Quantile / 1D Wasserstein proxy)
-// IMPORTANT: sort OUTSIDE gradient graph safely
+// =============== DATA =====================
+function createInput() {
+  return tf.randomUniform([1, SIZE, SIZE, 1]);
+}
+
+// =============== MODEL ====================
+function createModel(arch) {
+  const m = tf.sequential();
+  m.add(tf.layers.flatten({ inputShape: [SIZE, SIZE, 1] }));
+
+  if (arch === "compression") {
+    m.add(tf.layers.dense({ units: 64, activation: "relu" }));
+  } else if (arch === "transformation") {
+    m.add(tf.layers.dense({ units: 256, activation: "relu" }));
+    m.add(tf.layers.dense({ units: 256, activation: "relu" }));
+  } else if (arch === "expansion") {
+    m.add(tf.layers.dense({ units: 512, activation: "relu" }));
+    m.add(tf.layers.dense({ units: 512, activation: "relu" }));
+  }
+
+  m.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
+  m.add(tf.layers.reshape({ targetShape: [SIZE, SIZE, 1] }));
+
+  return m;
+}
+
+// =============== LOSSES ===================
+// Sorted MSE (LECTURE CORE)
 function sortedMSE(yTrue, yPred) {
   return tf.tidy(() => {
-    const tFlat = yTrue.reshape([256]);
-    const pFlat = yPred.reshape([256]);
+    const t = yTrue.flatten();
+    const p = yPred.flatten();
 
-    // Use tf.topk trick to get sorted tensors (DIFFERENTIABLE graph-safe)
-    const tSorted = tf.topk(tFlat, 256, true).values;
-    const pSorted = tf.topk(pFlat, 256, true).values;
+    const tSorted = tf.sort(t);
+    const pSorted = tf.sort(p);
 
     return tf.losses.meanSquaredError(tSorted, pSorted);
   });
 }
 
-// Total Variation (Smoothness)
-function smoothness(yPred) {
-  const dx = yPred
-    .slice([0, 0, 0, 0], [-1, -1, 15, -1])
-    .sub(yPred.slice([0, 0, 1, 0], [-1, -1, 15, -1]));
-
-  const dy = yPred
-    .slice([0, 0, 0, 0], [-1, 15, -1, -1])
-    .sub(yPred.slice([0, 1, 0, 0], [-1, 15, -1, -1]));
-
-  return tf.mean(tf.square(dx)).add(tf.mean(tf.square(dy)));
-}
-
-// Direction: left dark → right bright (from lecture slide)
-function directionX(yPred) {
-  const mask = tf.linspace(-1, 1, 16).reshape([1, 1, 16, 1]);
-  return tf.mean(yPred.mul(mask)).mul(-1);
-}
-
-// FINAL lecture-compliant loss
-function studentLoss(yTrue, yPred) {
+// Smoothness (Total Variation)
+function smoothness(y) {
   return tf.tidy(() => {
-    const L_sorted = sortedMSE(yTrue, yPred); // conservation
-    const L_smooth = smoothness(yPred);       // TV loss
-    const L_dir = directionX(yPred);          // gradient direction
+    const dx = y.slice([0, 0, 0, 0], [-1, -1, SIZE - 1, -1])
+      .sub(y.slice([0, 0, 1, 0], [-1, -1, SIZE - 1, -1]));
 
-    // EXACT philosophy from lecture
-    return tf.addN([
-      L_sorted.mul(1.0),   // keep color inventory
-      L_smooth.mul(4.0),   // strong structure
-      L_dir.mul(1.0)       // enforce gradient
-    ]);
+    const dy = y.slice([0, 0, 0, 0], [-1, SIZE - 1, -1, -1])
+      .sub(y.slice([0, 1, 0, 0], [-1, SIZE - 1, -1, -1]));
+
+    return tf.mean(dx.square()).add(tf.mean(dy.square()));
   });
 }
 
-// =======================
-// MODELS
-// =======================
-
-function createBaselineModel() {
-  const model = tf.sequential();
-  model.add(tf.layers.flatten({ inputShape: CONFIG.inputShapeModel }));
-  model.add(tf.layers.dense({ units: 64, activation: "relu" }));
-  model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
-  model.add(tf.layers.reshape({ targetShape: [16, 16, 1] }));
-  return model;
+// Direction: dark left → bright right
+function directionLoss(y) {
+  return tf.tidy(() => {
+    const mask = tf.linspace(-1, 1, SIZE)
+      .reshape([1, 1, SIZE, 1]);
+    return tf.mean(y.mul(mask)).mul(-1);
+  });
 }
 
-function createStudentModel(archType) {
-  const model = tf.sequential();
-  model.add(tf.layers.flatten({ inputShape: CONFIG.inputShapeModel }));
+function totalLoss(x, y) {
+  const l1 = sortedMSE(x, y);     // CONSERVE COLORS (lecture!)
+  const l2 = smoothness(y);       // SMOOTH GRADIENT
+  const l3 = directionLoss(y);    // LEFT→RIGHT
 
-  if (archType === "compression") {
-    model.add(tf.layers.dense({ units: 64, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
-
-  } else if (archType === "transformation") {
-    model.add(tf.layers.dense({ units: 256, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
-
-  } else if (archType === "expansion") {
-    model.add(tf.layers.dense({ units: 512, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 512, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
-  }
-
-  model.add(tf.layers.reshape({ targetShape: [16, 16, 1] }));
-  return model;
+  return tf.addN([
+    l1.mul(5.0),
+    l2.mul(2.0),
+    l3.mul(1.0)
+  ]);
 }
 
-// =======================
-// TRAINING LOOP (FIXED)
-// =======================
+// =============== TRAIN ====================
+function trainStep() {
+  step++;
 
-async function trainStep() {
-  state.step++;
-
-  // --- Baseline ---
-  const baselineLossTensor = state.baselineOptimizer.minimize(() => {
-    const yPred = state.baselineModel.predict(state.xInput);
-    return mse(state.xInput, yPred);
+  const lossTensor = optimizer.minimize(() => {
+    const yPred = model.predict(xInput);
+    return totalLoss(xInput, yPred);
   }, true);
 
-  const baselineLossVal = baselineLossTensor.dataSync()[0];
-  baselineLossTensor.dispose();
+  const loss = lossTensor.dataSync()[0];
+  lossTensor.dispose();
 
-  // --- Student (LECTURE LOSS) ---
-  const studentLossTensor = state.studentOptimizer.minimize(() => {
-    const yPred = state.studentModel.predict(state.xInput);
-    return studentLoss(state.xInput, yPred);
-  }, true);
-
-  const studentLossVal = studentLossTensor.dataSync()[0];
-  studentLossTensor.dispose();
-
-  log(
-    `Step ${state.step}: Base Loss=${baselineLossVal.toFixed(4)} | Student Loss=${studentLossVal.toFixed(4)}`
-  );
-
-  if (state.step % 5 === 0 || !state.isAutoTraining) {
-    await render();
-    updateLossDisplay(baselineLossVal, studentLossVal);
-  }
+  render();
+  log(`Step ${step} | Loss: ${loss.toFixed(4)}`);
 }
 
-// =======================
-// INIT & UI
-// =======================
+// =============== RENDER ===================
+async function render() {
+  const out = model.predict(xInput);
 
-function init() {
-  state.xInput = tf.randomUniform(CONFIG.inputShapeData);
-
-  // ВАЖНО: явно передаём строку, а не event
-  document.getElementById("btn-train").addEventListener("click", () => {
-    trainStep();
-  });
-
-  document.getElementById("btn-auto").addEventListener("click", () => {
-    toggleAutoTrain();
-  });
-
-  document.getElementById("btn-reset").addEventListener("click", () => {
-    resetModels(); // ← БЕЗ event
-  });
-
-  document.querySelectorAll('input[name="arch"]').forEach((radio) => {
-    radio.addEventListener("change", (e) => {
-      resetModels(e.target.value); // ← строка, не event
-      document.getElementById("student-arch-label").innerText =
-        e.target.value.charAt(0).toUpperCase() + e.target.value.slice(1);
-    });
-  });
-
-  resetModels(); // initial models AFTER handlers
-
-  tf.browser.toPixels(
-    state.xInput.squeeze(),
-    document.getElementById("canvas-input")
+  await tf.browser.toPixels(
+    xInput.squeeze(),
+    document.getElementById("inputCanvas")
   );
 
-  log("Initialized. Ready to train.");
+  await tf.browser.toPixels(
+    out.squeeze(),
+    document.getElementById("outputCanvas")
+  );
+
+  out.dispose();
 }
 
-function resetModels(archType = null) {
-  // 🔥 ФИКС: защита от PointerEvent
-  if (typeof archType !== "string") {
-    const checked = document.querySelector('input[name="arch"]:checked');
-    archType = checked ? checked.value : "compression";
-  }
+// =============== RESET ====================
+function reset() {
+  const arch = document.querySelector(
+    'input[name="arch"]:checked'
+  ).value;
 
-  if (state.baselineModel) state.baselineModel.dispose();
-  if (state.studentModel) state.studentModel.dispose();
-  if (state.baselineOptimizer) state.baselineOptimizer.dispose();
-  if (state.studentOptimizer) state.studentOptimizer.dispose();
+  if (model) model.dispose();
 
-  state.baselineModel = createBaselineModel();
-  state.studentModel = createStudentModel(archType);
+  model = createModel(arch);
+  optimizer = tf.train.adam(LR);
+  step = 0;
 
-  state.baselineOptimizer = tf.train.adam(CONFIG.learningRate);
-  state.studentOptimizer = tf.train.adam(CONFIG.learningRate);
-  state.step = 0;
-
-  log(`Models reset. Arch: ${archType}`);
+  log(`Model reset. Architecture: ${arch}`);
   render();
 }
 
-async function render() {
-  const base = state.baselineModel.predict(state.xInput);
-  const stud = state.studentModel.predict(state.xInput);
+// =============== AUTO TRAIN ===============
+function toggleAuto() {
+  auto = !auto;
+  const btn = document.getElementById("autoBtn");
+  btn.textContent = auto ? "Auto Train (Stop)" : "Auto Train (Start)";
 
-  await tf.browser.toPixels(
-    base.clipByValue(0, 1).squeeze(),
-    document.getElementById("canvas-baseline")
-  );
-  await tf.browser.toPixels(
-    stud.clipByValue(0, 1).squeeze(),
-    document.getElementById("canvas-student")
-  );
-
-  base.dispose();
-  stud.dispose();
-}
-
-function updateLossDisplay(base, stud) {
-  document.getElementById("loss-baseline").innerText =
-    `Loss: ${base.toFixed(5)}`;
-  document.getElementById("loss-student").innerText =
-    `Loss: ${stud.toFixed(5)}`;
-}
-
-function log(msg) {
-  const el = document.getElementById("log-area");
-  const span = document.createElement("div");
-  span.innerText = `> ${msg}`;
-  el.prepend(span);
-}
-
-function toggleAutoTrain() {
-  state.isAutoTraining = !state.isAutoTraining;
-  document.getElementById("btn-auto").innerText =
-    state.isAutoTraining ? "Auto Train (Stop)" : "Auto Train (Start)";
-  loop();
+  if (auto) loop();
 }
 
 function loop() {
-  if (state.isAutoTraining) {
-    trainStep();
-    setTimeout(loop, CONFIG.autoTrainSpeed);
-  }
+  if (!auto) return;
+  trainStep();
+  setTimeout(loop, 50);
+}
+
+// =============== INIT =====================
+async function init() {
+  xInput = createInput();
+
+  document.getElementById("trainBtn").onclick = trainStep;
+  document.getElementById("autoBtn").onclick = toggleAuto;
+  document.getElementById("resetBtn").onclick = reset;
+
+  document.querySelectorAll('input[name="arch"]').forEach(r => {
+    r.onchange = reset;
+  });
+
+  reset();
+  log("Stable version initialized. Buttons fixed.");
 }
 
 init();
