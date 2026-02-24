@@ -40,19 +40,30 @@ function mse(yTrue, yPred) {
 
 // TODO: Helper - Smoothness (Total Variation)
 // Penalize differences between adjacent pixels to encourage smoothness.
-function smoothness(yPred) {
-  // Difference in X direction: pixel[i, j] - pixel[i, j+1]
-  const diffX = yPred
-    .slice([0, 0, 0, 0], [-1, -1, 15, -1])
-    .sub(yPred.slice([0, 0, 1, 0], [-1, -1, 15, -1]));
+// Safe argsort for TFJS (browser compatible)
+function argsort1D(tensor) {
+  const arr = Array.from(tensor.dataSync())
+    .map((v, i) => ({ v, i }))
+    .sort((a, b) => a.v - b.v)
+    .map(obj => obj.i);
 
-  // Difference in Y direction: pixel[i, j] - pixel[i+1, j]
-  const diffY = yPred
-    .slice([0, 0, 0, 0], [-1, 15, -1, -1])
-    .sub(yPred.slice([0, 1, 0, 0], [-1, 15, -1, -1]));
+  return tf.tensor1d(arr, 'int32');
+}
 
-  // Return sum of squares
-  return tf.mean(tf.square(diffX)).add(tf.mean(tf.square(diffY)));
+// HARD permutation layer (NO new colors!)
+function rearrangeByScores(xInput, scores) {
+  return tf.tidy(() => {
+    const xFlat = xInput.reshape([256]);   // ORIGINAL pixels
+    const sFlat = scores.reshape([256]);   // predicted ordering scores
+
+    // JS argsort (instead of tf.argsort)
+    const indices = argsort1D(sFlat);
+
+    // 🔥 CRITICAL: we gather ONLY original pixels
+    const rearranged = tf.gather(xFlat, indices);
+
+    return rearranged.reshape([1, 16, 16, 1]);
+  });
 }
 
 // TODO: Helper - Directionality (Gradient)
@@ -171,7 +182,9 @@ async function trainStep() {
   try {
     studentLossVal = tf.tidy(() => {
       const { value, grads } = tf.variableGrads(() => {
-        const yPred = state.studentModel.predict(state.xInput);
+        const scores = state.studentModel.predict(state.xInput);
+        // FINAL OUTPUT = PERMUTATION OF ORIGINAL PIXELS
+        const yPred = rearrangeByScores(state.xInput, scores);
         return studentLoss(state.xInput, yPred);
       }, state.studentModel.getWeights());
 
@@ -284,25 +297,27 @@ function resetModels(archType = null) {
 }
 
 async function render() {
-  const basePred = state.baselineModel.predict(state.xInput);
-  const studPred = state.studentModel.predict(state.xInput);
+  const baseRaw = state.baselineModel.predict(state.xInput);
+  const studScores = state.studentModel.predict(state.xInput);
 
-  const baseVis = basePred.clipByValue(0, 1);
-  const studVis = studPred.clipByValue(0, 1);
+  // 🔥 REAL student output = rearranged original pixels
+  const studPred = rearrangeByScores(state.xInput, studScores);
+
+  const baseVis = baseRaw.clipByValue(0, 1);
 
   await tf.browser.toPixels(
     baseVis.squeeze(),
     document.getElementById("canvas-baseline"),
   );
   await tf.browser.toPixels(
-    studVis.squeeze(),
+    studPred.squeeze(),
     document.getElementById("canvas-student"),
   );
 
-  basePred.dispose();
+  baseRaw.dispose();
+  studScores.dispose();
   studPred.dispose();
   baseVis.dispose();
-  studVis.dispose();
 }
 
 // UI Helpers
