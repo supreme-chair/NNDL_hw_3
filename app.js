@@ -192,9 +192,8 @@ async function trainStep() {
   try {
     studentLossVal = tf.tidy(() => {
       const { value, grads } = tf.variableGrads(() => {
-        const scores = state.studentModel.predict(state.xInput);
-        // FINAL OUTPUT = PERMUTATION OF ORIGINAL PIXELS
-        const yPred = rearrangeByScores(state.xInput, scores);
+        const yPred = state.studentModel.predict(state.xInput);
+        // модель генерирует output напрямую (дифференцируемо)
         return studentLoss(state.xInput, yPred);
       }, state.studentModel.getWeights());
 
