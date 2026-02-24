@@ -1,16 +1,13 @@
 /**
- * FINAL STABLE VERSION
- * - Работает на GitHub Pages
- * - Кнопки не ломаются
- * - Нет PointerEvent бага
- * - Нет "Cannot find connection" ошибки
- * - Чистый Sorted MSE (как в лекции)
- * - Строит градиент стабильно
+ * FINAL GITHUB PAGES SAFE VERSION
+ * - No tf.sort (browser compatible)
+ * - Stable training
+ * - Buttons always work
+ * - Matches lecture: Sorted MSE + Smooth + Direction
  */
 
-// ================= CONFIG =================
 const SIZE = 16;
-const LEARNING_RATE = 0.005;
+const LR = 0.005;
 const AUTO_DELAY = 50;
 
 let state = {
@@ -21,30 +18,32 @@ let state = {
   xInput: null
 };
 
-// ================= LOG =================
+// ===== LOG =====
 function log(msg) {
-  const logEl = document.getElementById("log");
+  const el = document.getElementById("log");
   const line = document.createElement("div");
   line.textContent = "> " + msg;
-  logEl.prepend(line);
+  el.prepend(line);
 }
 
-// ================= DATA =================
-function createFixedNoise() {
+// ===== DATA =====
+function createNoise() {
   return tf.randomUniform([1, SIZE, SIZE, 1]);
 }
 
-// ================= MODEL =================
-function createStudentModel(arch) {
+// ===== MODEL =====
+function createModel(arch) {
   const model = tf.sequential();
   model.add(tf.layers.flatten({ inputShape: [SIZE, SIZE, 1] }));
 
   if (arch === "compression") {
     model.add(tf.layers.dense({ units: 64, activation: "relu" }));
-  } else if (arch === "transformation") {
+  } 
+  else if (arch === "transformation") {
     model.add(tf.layers.dense({ units: 256, activation: "relu" }));
     model.add(tf.layers.dense({ units: 256, activation: "relu" }));
-  } else if (arch === "expansion") {
+  } 
+  else if (arch === "expansion") {
     model.add(tf.layers.dense({ units: 512, activation: "relu" }));
     model.add(tf.layers.dense({ units: 512, activation: "relu" }));
   }
@@ -55,22 +54,29 @@ function createStudentModel(arch) {
   return model;
 }
 
-// ================= LOSSES (LECTURE-ALIGNED) =================
-
-// 🔥 Sorted MSE = Quantile / 1D Wasserstein (как в лекции)
+// ===== SORTED MSE (LECTURE-CORRECT, TFJS SAFE) =====
 function sortedMSE(yTrue, yPred) {
   return tf.tidy(() => {
-    const t = yTrue.reshape([SIZE * SIZE]);
-    const p = yPred.reshape([SIZE * SIZE]);
+    const tFlat = yTrue.reshape([SIZE * SIZE]);
+    const pFlat = yPred.reshape([SIZE * SIZE]);
 
-    const tSorted = tf.sort(t);
-    const pSorted = tf.sort(p);
+    // 🔥 ВАЖНО: JS sort вместо tf.sort (иначе краш в браузере)
+    const tArr = Array.from(tFlat.dataSync()).sort((a, b) => a - b);
+    const pArr = Array.from(pFlat.dataSync()).sort((a, b) => a - b);
 
-    return tf.losses.meanSquaredError(tSorted, pSorted);
+    const tSorted = tf.tensor1d(tArr);
+    const pSorted = tf.tensor1d(pArr);
+
+    const loss = tf.losses.meanSquaredError(tSorted, pSorted);
+
+    tSorted.dispose();
+    pSorted.dispose();
+
+    return loss;
   });
 }
 
-// Total Variation (гладкость)
+// ===== SMOOTHNESS (TV Loss) =====
 function smoothnessLoss(y) {
   return tf.tidy(() => {
     const dx = y.slice([0, 0, 0, 0], [-1, -1, SIZE - 1, -1])
@@ -83,7 +89,7 @@ function smoothnessLoss(y) {
   });
 }
 
-// Направление: слева тёмно → справа светло
+// ===== DIRECTION LOSS =====
 function directionLoss(y) {
   return tf.tidy(() => {
     const mask = tf.linspace(-1, 1, SIZE)
@@ -93,22 +99,22 @@ function directionLoss(y) {
   });
 }
 
-// Финальный loss (ПРЯМО ПО СЛАЙДУ)
+// ===== FINAL LOSS (как на слайде) =====
 function studentLoss(xInput, yPred) {
   return tf.tidy(() => {
-    const lSorted = sortedMSE(xInput, yPred); // ключ лекции
+    const lSorted = sortedMSE(xInput, yPred);
     const lSmooth = smoothnessLoss(yPred);
     const lDir = directionLoss(yPred);
 
     return tf.addN([
-      lSorted.mul(5.0),   // сохраняем "инвентарь цветов"
-      lSmooth.mul(2.0),   // делаем градиент гладким
-      lDir.mul(1.0)       // задаём направление
+      lSorted.mul(4.0),   // ключ: сохранить "инвентарь цветов"
+      lSmooth.mul(1.5),   // сгладить в градиент
+      lDir.mul(0.8)       // направление слева → направо
     ]);
   });
 }
 
-// ================= TRAIN =================
+// ===== TRAIN =====
 function trainStep() {
   state.step++;
 
@@ -117,14 +123,14 @@ function trainStep() {
     return studentLoss(state.xInput, yPred);
   }, true);
 
-  const lossValue = lossTensor.dataSync()[0];
+  const loss = lossTensor.dataSync()[0];
   lossTensor.dispose();
 
   render();
-  log(`Step ${state.step} | Loss: ${lossValue.toFixed(4)}`);
+  log(`Step ${state.step} | Loss: ${loss.toFixed(4)}`);
 }
 
-// ================= AUTO TRAIN =================
+// ===== AUTO TRAIN =====
 function autoLoop() {
   if (!state.isAuto) return;
   trainStep();
@@ -138,7 +144,7 @@ function toggleAuto() {
   if (state.isAuto) autoLoop();
 }
 
-// ================= RENDER =================
+// ===== RENDER =====
 async function render() {
   const yPred = state.model.predict(state.xInput);
 
@@ -155,40 +161,38 @@ async function render() {
   yPred.dispose();
 }
 
-// ================= RESET =================
-function getSelectedArch() {
+// ===== RESET =====
+function getArch() {
   const radio = document.querySelector('input[name="arch"]:checked');
   return radio ? radio.value : "compression";
 }
 
-function resetModels() {
+function resetModel() {
   if (state.model) state.model.dispose();
 
-  const arch = getSelectedArch();
-
-  state.model = createStudentModel(arch);
-  state.optimizer = tf.train.adam(LEARNING_RATE);
+  const arch = getArch();
+  state.model = createModel(arch);
+  state.optimizer = tf.train.adam(LR);
   state.step = 0;
 
-  log(`Models reset. Arch: ${arch}`);
+  log(`Model reset | Arch: ${arch}`);
   render();
 }
 
-// ================= INIT =================
+// ===== INIT =====
 function init() {
-  state.xInput = createFixedNoise();
+  state.xInput = createNoise();
 
-  // КНОПКИ (без багов и PointerEvent)
   document.getElementById("trainBtn").addEventListener("click", trainStep);
   document.getElementById("autoBtn").addEventListener("click", toggleAuto);
-  document.getElementById("resetBtn").addEventListener("click", resetModels);
+  document.getElementById("resetBtn").addEventListener("click", resetModel);
 
-  document.querySelectorAll('input[name="arch"]').forEach(radio => {
-    radio.addEventListener("change", resetModels);
+  document.querySelectorAll('input[name="arch"]').forEach(r => {
+    r.addEventListener("change", resetModel);
   });
 
-  resetModels();
-  log("FINAL stable version initialized (GitHub Pages safe).");
+  resetModel();
+  log("GitHub Pages stable build initialized.");
 }
 
 init();
