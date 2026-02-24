@@ -107,9 +107,9 @@ function studentLoss(xInput, yPred) {
     const lDir = directionLoss(yPred);
 
     return tf.addN([
-      lSorted.mul(4.0),   // ключ: сохранить "инвентарь цветов"
-      lSmooth.mul(1.5),   // сгладить в градиент
-      lDir.mul(0.8)       // направление слева → направо
+      lSorted.mul(2.0),   // ключ: сохранить "инвентарь цветов"
+      lSmooth.mul(4.5),   // сгладить в градиент
+      lDir.mul(1.0)       // направление слева → направо
     ]);
   });
 }
