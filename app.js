@@ -65,7 +65,17 @@ function rearrangeByScores(xInput, scores) {
     return rearranged.reshape([1, 16, 16, 1]);
   });
 }
+function smoothness(yPred) {
+  const diffX = yPred
+    .slice([0, 0, 0, 0], [-1, -1, 15, -1])
+    .sub(yPred.slice([0, 0, 1, 0], [-1, -1, 15, -1]));
 
+  const diffY = yPred
+    .slice([0, 0, 0, 0], [-1, 15, -1, -1])
+    .sub(yPred.slice([0, 1, 0, 0], [-1, 15, -1, -1]));
+
+  return tf.mean(tf.square(diffX)).add(tf.mean(tf.square(diffY)));
+}
 // TODO: Helper - Directionality (Gradient)
 // Encourage pixels on the right to be brighter than pixels on the left.
 function directionX(yPred) {
@@ -114,7 +124,7 @@ function createBaselineModel() {
   const model = tf.sequential();
   model.add(tf.layers.flatten({ inputShape: CONFIG.inputShapeModel }));
   model.add(tf.layers.dense({ units: 64, activation: "relu" })); // Bottleneck
-  model.add(tf.layers.dense({ units: 256, activation: "sigmoid" })); // Output 0-1
+  model.add(tf.layers.dense({ units: 256, activation: "linear" })); // Output 0-1
   // Reshape back to [16, 16, 1] (batch dim is handled automatically)
   model.add(tf.layers.reshape({ targetShape: [16, 16, 1] }));
   return model;
@@ -131,19 +141,19 @@ function createStudentModel(archType) {
   if (archType === "compression") {
     // Undercomplete projection (как baseline, но обучается с другим loss)
     model.add(tf.layers.dense({ units: 64, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
+    model.add(tf.layers.dense({ units: 256, activation: "linear" }));
 
   } else if (archType === "transformation") {
     // Projection 256 → 256 (чистая трансформация)
     model.add(tf.layers.dense({ units: 256, activation: "relu" }));
     model.add(tf.layers.dense({ units: 256, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
+    model.add(tf.layers.dense({ units: 256, activation: "linear" }));
 
   } else if (archType === "expansion") {
     // Overcomplete projection (как в лекции)
     model.add(tf.layers.dense({ units: 512, activation: "relu" }));
     model.add(tf.layers.dense({ units: 512, activation: "relu" }));
-    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" }));
+    model.add(tf.layers.dense({ units: 256, activation: "linear" }));
   }
 
   model.add(tf.layers.reshape({ targetShape: [16, 16, 1] }));
@@ -403,9 +413,9 @@ function studentLoss(yTrue, yPred) {
 
     // Баланс как в учебной задаче
     return tf.addN([
-      lossSorted.mul(3.0),   // 🔥 ключ: не создавать новые цвета
-      lossSmooth.mul(1.5),   // формируем структуру градиента
-      lossDir.mul(0.3),      // направление градиента
+      lossSorted.mul(5.0),   // 🔥 ключ: не создавать новые цвета
+      lossSmooth.mul(2.0),   // формируем структуру градиента
+      lossDir.mul(0.8),      // направление градиента
       lossAnchor             // предотвращает коллапс
     ]);
   });
