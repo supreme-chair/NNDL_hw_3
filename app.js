@@ -307,10 +307,7 @@ function resetModels(archType = null) {
 
 async function render() {
   const baseRaw = state.baselineModel.predict(state.xInput);
-  const studScores = state.studentModel.predict(state.xInput);
-
-  // 🔥 REAL student output = rearranged original pixels
-  const studPred = rearrangeByScores(state.xInput, studScores);
+  const studPred = state.studentModel.predict(state.xInput);
 
   const baseVis = baseRaw.clipByValue(0, 1);
 
@@ -397,25 +394,14 @@ function sortedMSE(yTrue, yPred) {
 
 function studentLoss(yTrue, yPred) {
   return tf.tidy(() => {
-    // 1. 🔥 ГЛАВНЫЙ ЗАКОН ЗАДАНИЯ
-    // Сохраняем набор цветов (Input Histogram ≈ Output Histogram)
-    const lossSorted = sortedMSE(yTrue, yPred);
+    const lossSorted = sortedMSE(yTrue, yPred);  // conservation
+    const lossSmooth = smoothness(yPred);        // TV loss
+    const lossDir = directionX(yPred);           // direction
 
-    // 2. Гладкость (чтобы получился градиент)
-    const lossSmooth = smoothness(yPred);
-
-    // 3. Направление (left dark → right bright)
-    const lossDir = directionX(yPred);
-
-    // 4. Очень слабая привязка к входу (стабильность)
-    const lossAnchor = mse(yTrue, yPred).mul(0.05);
-
-    // Баланс как в учебной задаче
     return tf.addN([
-      lossSorted.mul(5.0),   // 🔥 ключ: не создавать новые цвета
-      lossSmooth.mul(2.0),   // формируем структуру градиента
-      lossDir.mul(0.8),      // направление градиента
-      lossAnchor             // предотвращает коллапс
+      lossSorted.mul(1.0),   // НЕ 5.0 !!!
+      lossSmooth.mul(3.0),   // усилить структуру
+      lossDir.mul(1.0)       // усилить градиент
     ]);
   });
 }
